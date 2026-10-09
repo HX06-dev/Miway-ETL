@@ -2,6 +2,7 @@
 --   1. routes
 --   2. stops
 --   3. trips
+--   4. stop_times
 
 CREATE TABLE IF NOT EXISTS routes (
     route_id TEXT PRIMARY KEY,
@@ -57,4 +58,26 @@ CREATE TABLE IF NOT EXISTS trips (
     CONSTRAINT trips_route_fk
         FOREIGN KEY (route_id)
         REFERENCES routes (route_id)
+);
+
+CREATE TABLE IF NOT EXISTS stop_times (
+    trip_id TEXT NOT NULL,
+    arrival_time TEXT,
+    departure_time TEXT,
+    stop_id TEXT NOT NULL,
+    stop_sequence INTEGER NOT NULL,
+    stop_headsign TEXT,
+    pickup_type SMALLINT CHECK (pickup_type BETWEEN 0 AND 3),
+    drop_off_type SMALLINT CHECK (drop_off_type BETWEEN 0 AND 3),
+    continuous_pickup SMALLINT CHECK (continuous_pickup BETWEEN 0 AND 3),
+    continuous_drop_off SMALLINT CHECK (continuous_drop_off BETWEEN 0 AND 3),
+    shape_dist_traveled DOUBLE PRECISION,
+    timepoint SMALLINT CHECK (timepoint BETWEEN 0 AND 1),
+    PRIMARY KEY (trip_id, stop_sequence),
+    CONSTRAINT stop_times_trip_fk
+        FOREIGN KEY (trip_id)
+        REFERENCES trips (trip_id),
+    CONSTRAINT stop_times_stop_fk
+        FOREIGN KEY (stop_id)
+        REFERENCES stops (stop_id)
 );
