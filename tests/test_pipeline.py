@@ -1,5 +1,6 @@
 import csv
 import os
+import uuid
 from pathlib import Path
 from typing import Self
 from zipfile import ZipFile
@@ -8,6 +9,7 @@ import httpx
 import psycopg
 import pytest
 from dotenv import load_dotenv
+from google.transit import gtfs_realtime_pb2
 
 from miway_etl import extract, load, pipeline, transform
 from miway_etl.db import get_connection
@@ -25,6 +27,10 @@ def test_extract_downloads_required_gtfs_files(tmp_path: Path, monkeypatch) -> N
     with ZipFile(archive_path, "w") as archive:
         for file_name in ("routes.txt", "stops.txt", "trips.txt", "stop_times.txt"):
             archive.writestr(f"nested/{file_name}", f"{file_name}\n")
+        archive.writestr(
+            "nested/calendar_dates.txt",
+            "service_id,date,exception_type\nSERVICE,20261028,1\n",
+        )
 
     class StreamResponse:
         def __enter__(self):
@@ -53,7 +59,71 @@ def test_extract_downloads_required_gtfs_files(tmp_path: Path, monkeypatch) -> N
     ]
     for file_name in ("routes.txt", "stops.txt", "trips.txt", "stop_times.txt"):
         assert (release_path / file_name).read_text(encoding="utf-8") == f"{file_name}\n"
+    assert (release_path / "calendar_dates.txt").read_text(encoding="utf-8") == (
+        "service_id,date,exception_type\nSERVICE,20261028,1\n"
+    )
     assert list((tmp_path / "archives").glob("*.zip"))
+
+
+def test_extract_rejects_non_zip_download(tmp_path: Path, monkeypatch) -> None:
+    class StreamResponse:
+        def __enter__(self):
+            return httpx.Response(
+                200,
+                content=b"not a zip",
+                request=httpx.Request("GET", "https://example.test/feed.zip"),
+            )
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(extract.httpx, "stream", lambda *args, **kwargs: StreamResponse())
+    with pytest.raises(RuntimeError, match="not a valid ZIP"):
+        extract.download_gtfs_files(tmp_path, "https://example.test/feed.zip")
+    assert not list((tmp_path / "archives").glob("*.zip"))
+
+
+def test_extract_reports_http_404(tmp_path: Path, monkeypatch) -> None:
+    def request(*args, **kwargs):
+        response = httpx.Response(
+            404,
+            request=httpx.Request("GET", "https://example.test/feed.zip"),
+        )
+        response.raise_for_status()
+        return response
+
+    class StreamResponse:
+        def __enter__(self):
+            return request()
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(extract.httpx, "stream", lambda *args, **kwargs: StreamResponse())
+    with pytest.raises(RuntimeError, match="Unable to download"):
+        extract.download_gtfs_files(tmp_path, "https://example.test/feed.zip")
+
+
+def test_extract_reads_realtime_entities_and_rejects_missing_trip_id() -> None:
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.timestamp = 100
+    vehicle_entity = feed.entity.add()
+    vehicle_entity.id = "vehicle-1"
+    vehicle_entity.vehicle.vehicle.id = "bus-1"
+    vehicle_entity.vehicle.trip.trip_id = "trip-1"
+    vehicle_entity.vehicle.timestamp = 99
+    vehicle_entity.vehicle.position.speed = 4.5
+    update_entity = feed.entity.add()
+    update_entity.id = "missing-trip"
+    update_entity.trip_update.stop_time_update.add().stop_id = "stop-1"
+
+    vehicles = extract.read_vehicle_positions(feed)
+    trip_updates = extract.read_trip_updates(feed)
+
+    assert vehicles[0]["timestamp"] == 99
+    assert vehicles[0]["speed"] == 4.5
+    assert trip_updates == []
 
 
 def test_transform_cleans_routes_stops_and_trips() -> None:
@@ -89,7 +159,7 @@ def test_transform_cleans_stop_times() -> None:
         }
     ) == {
         "trip_id": "T1",
-        "arrival_time": "25:00:00",
+        "arrival_time": 90000,
         "stop_id": "S1",
         "stop_sequence": 2,
         "pickup_type": 0,
@@ -220,8 +290,8 @@ def test_pipeline_extracts_transforms_and_loads_in_order(
     assert calls[3][1] == [
         {
             "trip_id": "T1",
-            "arrival_time": "07:00:00",
-            "departure_time": "07:00:00",
+            "arrival_time": 25200,
+            "departure_time": 25200,
             "stop_id": "S1",
             "stop_sequence": 1,
             "timepoint": 1,
@@ -234,30 +304,45 @@ def test_pipeline_rolls_back_earlier_upserts_when_trip_load_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
     load_dotenv(pipeline.PROJECT_ROOT / ".env")
-    if not os.environ.get("DATABASE_URL"):
-        pytest.skip("DATABASE_URL is not configured")
-
-    monkeypatch.setattr(
-        pipeline,
-        "download_gtfs_files",
-        lambda output_dir: pipeline.DEFAULT_ROUTES_PATH.parent,
-    )
-    pipeline.run_pipeline()
+    test_database_url = os.environ.get("TEST_DATABASE_URL")
+    if not test_database_url:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
     with get_connection() as connection:
-        original_name = connection.execute(
-            "SELECT route_long_name FROM routes WHERE route_id = %s", ("1",)
-        ).fetchone()[0]
+        connection.execute(
+            (pipeline.PROJECT_ROOT / "sql" / "schema.sql").read_text(encoding="utf-8")
+        )
 
+    route_id = f"TEST_ROUTE_{uuid.uuid4().hex}"
+    trip_id = f"TEST_TRIP_{uuid.uuid4().hex}"
     routes_path = tmp_path / "routes.txt"
+    stops_path = tmp_path / "stops.txt"
     trips_path = tmp_path / "trips.txt"
+    stop_times_path = tmp_path / "stop_times.txt"
     routes_path.write_text(
-        pipeline.DEFAULT_ROUTES_PATH.read_text(encoding="utf-8"),
+        "route_id,agency_id,route_short_name,route_long_name,route_type\n"
+        f"{route_id},TEST,1,Original,3\n",
+        encoding="utf-8",
+    )
+    stops_path.write_text(
+        "stop_id,stop_name,stop_lat,stop_lon\nTEST_STOP,Test Stop,43.5,-79.6\n",
         encoding="utf-8",
     )
     trips_path.write_text(
-        pipeline.DEFAULT_TRIPS_PATH.read_text(encoding="utf-8"),
+        "route_id,service_id,trip_id\n"
+        f"{route_id},TEST,{trip_id}\n",
         encoding="utf-8",
     )
+    stop_times_path.write_text(
+        "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+        f"{trip_id},08:00:00,08:00:00,TEST_STOP,1\n",
+        encoding="utf-8",
+    )
+    pipeline.run_pipeline(routes_path, stops_path, trips_path, stop_times_path)
+    with get_connection() as connection:
+        original_name = connection.execute(
+            "SELECT route_long_name FROM routes WHERE route_id = %s", (route_id,)
+        ).fetchone()[0]
 
     with routes_path.open(newline="", encoding="utf-8") as file:
         routes = list(csv.DictReader(file))
@@ -278,12 +363,14 @@ def test_pipeline_rolls_back_earlier_upserts_when_trip_load_fails(
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         pipeline.run_pipeline(
             routes_path=routes_path,
+            stops_path=stops_path,
             trips_path=trips_path,
+            stop_times_path=stop_times_path,
         )
 
     with get_connection() as connection:
         persisted_name = connection.execute(
-            "SELECT route_long_name FROM routes WHERE route_id = %s", ("1",)
+            "SELECT route_long_name FROM routes WHERE route_id = %s", (route_id,)
         ).fetchone()[0]
 
     assert persisted_name == original_name

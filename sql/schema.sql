@@ -4,6 +4,12 @@
 --   3. trips
 --   4. stop_times
 
+CREATE TABLE IF NOT EXISTS static_feed_loads (
+    feed_name TEXT PRIMARY KEY,
+    feed_hash TEXT NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS routes (
     route_id TEXT PRIMARY KEY,
     agency_id TEXT NOT NULL,
@@ -60,10 +66,17 @@ CREATE TABLE IF NOT EXISTS trips (
         REFERENCES routes (route_id)
 );
 
+CREATE TABLE IF NOT EXISTS calendar_dates (
+    service_id TEXT NOT NULL,
+    date DATE NOT NULL,
+    exception_type SMALLINT NOT NULL CHECK (exception_type IN (1, 2)),
+    PRIMARY KEY (service_id, date)
+);
+
 CREATE TABLE IF NOT EXISTS stop_times (
     trip_id TEXT NOT NULL,
-    arrival_time TEXT,
-    departure_time TEXT,
+    arrival_time INTEGER,
+    departure_time INTEGER,
     stop_id TEXT NOT NULL,
     stop_sequence INTEGER NOT NULL,
     stop_headsign TEXT,
@@ -86,7 +99,7 @@ CREATE TABLE IF NOT EXISTS vehicle_positions (
     vehicle_id TEXT PRIMARY KEY,
     trip_id TEXT,
     route_id TEXT,
-    direction_id TEXT,
+    direction_id SMALLINT,
     latitude DOUBLE PRECISION,
     longitude DOUBLE PRECISION,
     bearing REAL,
@@ -97,8 +110,7 @@ CREATE TABLE IF NOT EXISTS vehicle_positions (
     timestamp BIGINT,
     congestion_level SMALLINT,
     occupancy_status SMALLINT,
-    occupancy_percentage SMALLINT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    occupancy_percentage SMALLINT
 );
 
 CREATE TABLE IF NOT EXISTS trip_updates (
@@ -107,12 +119,59 @@ CREATE TABLE IF NOT EXISTS trip_updates (
     vehicle_id TEXT,
     timestamp BIGINT,
     delay_seconds INTEGER,
-    stop_time_updates JSONB NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    stop_time_updates JSONB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id TEXT PRIMARY KEY,
+    observed_at BIGINT,
+    active_periods JSONB NOT NULL,
+    informed_entities JSONB NOT NULL,
+    cause SMALLINT,
+    effect SMALLINT,
+    url TEXT,
+    header_text TEXT,
+    description_text TEXT
+);
+
+CREATE INDEX IF NOT EXISTS trips_route_id_idx ON trips (route_id);
+CREATE INDEX IF NOT EXISTS stop_times_stop_id_idx ON stop_times (stop_id);
+CREATE INDEX IF NOT EXISTS stop_times_departure_time_idx ON stop_times (departure_time);
+
+CREATE TABLE IF NOT EXISTS vehicle_position_history (
+    vehicle_id TEXT NOT NULL,
+    observed_at BIGINT NOT NULL,
+    trip_id TEXT,
+    route_id TEXT,
+    direction_id SMALLINT,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    bearing REAL,
+    speed REAL,
+    current_stop_sequence INTEGER,
+    current_status SMALLINT,
+    stop_id TEXT,
+    congestion_level SMALLINT,
+    occupancy_status SMALLINT,
+    occupancy_percentage SMALLINT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vehicle_id, observed_at)
+);
+
+CREATE TABLE IF NOT EXISTS trip_update_history (
+    trip_id TEXT NOT NULL,
+    observed_at BIGINT NOT NULL,
+    route_id TEXT,
+    vehicle_id TEXT,
+    delay_seconds INTEGER,
+    stop_time_updates JSONB NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (trip_id, observed_at)
+);
+
+CREATE TABLE IF NOT EXISTS alert_history (
+    alert_id TEXT NOT NULL,
+    observed_at BIGINT NOT NULL,
     active_periods JSONB NOT NULL,
     informed_entities JSONB NOT NULL,
     cause SMALLINT,
@@ -120,5 +179,11 @@ CREATE TABLE IF NOT EXISTS alerts (
     url TEXT,
     header_text TEXT,
     description_text TEXT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (alert_id, observed_at)
 );
+
+CREATE INDEX IF NOT EXISTS vehicle_position_history_observed_idx
+    ON vehicle_position_history (observed_at);
+CREATE INDEX IF NOT EXISTS trip_update_history_observed_idx
+    ON trip_update_history (observed_at);

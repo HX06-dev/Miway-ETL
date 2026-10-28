@@ -1,6 +1,11 @@
 from typing import Any
 
 
+def _time_to_seconds(value: str) -> int:
+    hours, minutes, seconds = value.split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+
+
 def clean_route(row: dict[str, Any]) -> dict[str, Any]:
     integer_columns = {
         "route_type",
@@ -19,7 +24,6 @@ def clean_route(row: dict[str, Any]) -> dict[str, Any]:
         cleaned_row[column] = value
 
     return cleaned_row
-
 def _clean_strings(row: dict[str, Any]) -> dict[str, Any]:
     return {
         column: value.strip() or None if isinstance(value, str) else value
@@ -47,6 +51,12 @@ def clean_trip(row: dict[str, Any]) -> dict[str, Any]:
             cleaned_row[column] = int(cleaned_row[column])
     return cleaned_row
 
+def clean_calendar_date(row: dict[str, Any]) -> dict[str, Any]:
+    cleaned_row = _clean_strings(row)
+    if cleaned_row.get("exception_type") is not None:
+        cleaned_row["exception_type"] = int(cleaned_row["exception_type"])
+    return cleaned_row
+
 
 def clean_stop_time(row: dict[str, Any]) -> dict[str, Any]:
     cleaned_row = _clean_strings(row)
@@ -65,4 +75,7 @@ def clean_stop_time(row: dict[str, Any]) -> dict[str, Any]:
         and cleaned_row["shape_dist_traveled"] is not None
     ):
         cleaned_row["shape_dist_traveled"] = float(cleaned_row["shape_dist_traveled"])
+    for column in ("arrival_time", "departure_time"):
+        if column in cleaned_row and cleaned_row[column] is not None:
+            cleaned_row[column] = _time_to_seconds(cleaned_row[column])
     return cleaned_row

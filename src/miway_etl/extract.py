@@ -1,16 +1,37 @@
 import csv
+import hashlib
+import logging
 import os
+import shutil
 import tempfile
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from shutil import copyfileobj
 from zipfile import BadZipFile, ZipFile
 
 import httpx
 from google.transit import gtfs_realtime_pb2
 
 FEED_FILES = ("routes.txt", "stops.txt", "trips.txt", "stop_times.txt")
+OPTIONAL_FEED_FILES = ("calendar_dates.txt",)
+LOGGER = logging.getLogger(__name__)
+
+
+def _remove_tree(path: Path) -> None:
+    try:
+        if path.exists():
+            shutil.rmtree(path)
+    except OSError:
+        pass
+
+
+def _remove_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 def download_gtfs_files(
     output_dir: str | Path,
@@ -22,10 +43,8 @@ def download_gtfs_files(
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    archive_path = (
-        output_path
-        / "archives"
-        / f"gtfs-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.zip"
+    archive_path = output_path / "archives" / (
+        f"gtfs-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.zip"
     )
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     partial_archive_path = archive_path.with_suffix(".zip.part")
@@ -38,8 +57,22 @@ def download_gtfs_files(
                     archive_file.write(chunk)
         partial_archive_path.replace(archive_path)
     except httpx.HTTPError as error:
-        partial_archive_path.unlink(missing_ok=True)
         raise RuntimeError(f"Unable to download GTFS feed from {static_url}: {error}") from error
+    finally:
+        _remove_file(partial_archive_path)
+
+    digest_hasher = hashlib.sha256()
+    with archive_path.open("rb") as archive_file:
+        for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
+            digest_hasher.update(chunk)
+    digest = digest_hasher.hexdigest()
+    digest_path = output_path / ".gtfs.sha256"
+    latest_path = output_path / ".gtfs.latest"
+    if digest_path.exists() and latest_path.exists():
+        release_path = Path(latest_path.read_text(encoding="utf-8").strip())
+        if digest_path.read_text(encoding="utf-8").strip() == digest and release_path.exists():
+            _remove_file(archive_path)
+            return release_path
 
     release_path = output_path / "releases" / archive_path.stem
     release_path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +85,7 @@ def download_gtfs_files(
             members = {}
             for name in archive.namelist():
                 base_name = Path(name).name
-                if base_name in FEED_FILES:
+                if base_name in (*FEED_FILES, *OPTIONAL_FEED_FILES):
                     if base_name in members:
                         raise RuntimeError(f"GTFS feed contains duplicate file: {base_name}")
                     members[base_name] = name
@@ -63,19 +96,29 @@ def download_gtfs_files(
                 raise RuntimeError(f"GTFS feed is missing required files: {missing}")
 
             for file_name in FEED_FILES:
-                (staging_path / file_name).write_bytes(archive.read(members[file_name]))
+                with archive.open(members[file_name]) as source, (
+                    staging_path / file_name
+                ).open("wb") as target:
+                    copyfileobj(source, target)
+            for file_name in OPTIONAL_FEED_FILES:
+                if file_name in members:
+                    with archive.open(members[file_name]) as source, (
+                        staging_path / file_name
+                    ).open("wb") as target:
+                        copyfileobj(source, target)
         staging_path.replace(release_path)
     except BadZipFile as error:
-        for path in staging_path.iterdir():
-            path.unlink()
-        staging_path.rmdir()
+        _remove_tree(staging_path)
+        _remove_file(archive_path)
         raise RuntimeError("GTFS feed response is not a valid ZIP archive") from error
     except Exception:
-        for path in staging_path.iterdir():
-            path.unlink()
-        staging_path.rmdir()
+        _remove_tree(staging_path)
+        _remove_file(archive_path)
         raise
 
+    digest_path.write_text(digest, encoding="utf-8")
+    latest_path.write_text(str(release_path), encoding="utf-8")
+    (release_path / ".sha256").write_text(digest, encoding="utf-8")
     return release_path
 
 def _read_rows(file_path: str | Path) -> list[dict[str, str]]:
@@ -91,13 +134,19 @@ def read_stops(file_path: str | Path) -> list[dict[str, str]]:
 def read_trips(file_path: str | Path) -> list[dict[str, str]]:
     return _read_rows(file_path)
 
+def read_calendar_dates(file_path: str | Path) -> list[dict[str, str]]:
+    return _read_rows(file_path)
+
 
 def read_stop_times(file_path: str | Path) -> Iterator[dict[str, str]]:
     with Path(file_path).open(newline="", encoding="utf-8") as input_file:
         yield from csv.DictReader(input_file)
 
 
-def download_gtfs_realtime_feed(url: str | None = None) -> gtfs_realtime_pb2.FeedMessage:
+def download_gtfs_realtime_feed(
+    url: str | None = None,
+    raw_dir: str | Path | None = None,
+) -> gtfs_realtime_pb2.FeedMessage:
     """Download and decode a GTFS-realtime protobuf feed."""
     if not url:
         raise RuntimeError("A GTFS real-time URL is not set")
@@ -107,6 +156,12 @@ def download_gtfs_realtime_feed(url: str | None = None) -> gtfs_realtime_pb2.Fee
         response.raise_for_status()
     except httpx.HTTPError as error:
         raise RuntimeError(f"Unable to download GTFS real-time feed from {url}: {error}") from error
+
+    if raw_dir is not None:
+        raw_path = Path(raw_dir)
+        raw_path.mkdir(parents=True, exist_ok=True)
+        filename = f"gtfs-rt-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.pb"
+        (raw_path / filename).write_bytes(response.content)
 
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
@@ -142,19 +197,27 @@ def read_vehicle_positions(
         else read_gtfs_realtime_feed(source)
     )
     rows = []
+    rejected = 0
     for entity in feed.entity:
         if not entity.HasField("vehicle"):
             continue
         vehicle = entity.vehicle
         position = vehicle.position if vehicle.HasField("position") else None
         trip = vehicle.trip if vehicle.HasField("trip") else None
+        if not vehicle.HasField("vehicle") or not vehicle.vehicle.id:
+            rejected += 1
+            continue
         rows.append(
             {
-                "vehicle_id": vehicle.vehicle.id if vehicle.HasField("vehicle") else entity.id,
+                "vehicle_id": vehicle.vehicle.id if vehicle.HasField("vehicle") else None,
                 "trip_id": trip.trip_id if trip else None,
                 "route_id": trip.route_id if trip else None,
                 "direction_id": (
-                    trip.direction_id if trip and trip.HasField("direction_id") else None
+                    int(str(trip.direction_id))
+                    if trip
+                    and trip.HasField("direction_id")
+                    and str(trip.direction_id).isdigit()
+                    else None
                 ),
                 "latitude": position.latitude if position else None,
                 "longitude": position.longitude if position else None,
@@ -181,6 +244,8 @@ def read_vehicle_positions(
                 ),
             }
         )
+    if rejected:
+        LOGGER.warning("Rejected %d vehicle entities without vehicle_id", rejected)
     return rows
 
 
@@ -192,6 +257,7 @@ def read_alerts(
         if isinstance(source, gtfs_realtime_pb2.FeedMessage)
         else read_gtfs_realtime_feed(source)
     )
+    feed_timestamp = feed.header.timestamp if feed.header.HasField("timestamp") else None
     rows = []
     for entity in feed.entity:
         if not entity.HasField("alert"):
@@ -200,6 +266,7 @@ def read_alerts(
         rows.append(
             {
                 "alert_id": entity.id,
+                "observed_at": feed_timestamp,
                 "active_periods": [
                     {
                         "start": period.start if period.HasField("start") else None,
@@ -233,6 +300,7 @@ def read_alerts(
                 else None,
             }
         )
+
     return rows
 
 
@@ -244,13 +312,18 @@ def read_trip_updates(
         if isinstance(source, gtfs_realtime_pb2.FeedMessage)
         else read_gtfs_realtime_feed(source)
     )
+    feed_timestamp = feed.header.timestamp if feed.header.HasField("timestamp") else None
     rows = []
+    rejected = 0
     for entity in feed.entity:
         if not entity.HasField("trip_update"):
             continue
         update = entity.trip_update
         trip = update.trip
         vehicle = update.vehicle
+        if not trip.trip_id:
+            rejected += 1
+            continue
         stop_time_updates = [
             {
                 "stop_sequence": stop.stop_sequence if stop.HasField("stop_sequence") else None,
@@ -272,10 +345,10 @@ def read_trip_updates(
         ]
         rows.append(
             {
-                "trip_id": trip.trip_id or entity.id,
+                "trip_id": trip.trip_id,
                 "route_id": trip.route_id if trip.HasField("route_id") else None,
                 "vehicle_id": vehicle.id if vehicle.HasField("id") else None,
-                "timestamp": update.timestamp if update.HasField("timestamp") else None,
+                "timestamp": update.timestamp if update.HasField("timestamp") else feed_timestamp,
                 "delay_seconds": (
                     stop_time_updates[0]["arrival"]["delay"]
                     if stop_time_updates
@@ -286,4 +359,6 @@ def read_trip_updates(
                 "stop_time_updates": stop_time_updates,
             }
         )
+    if rejected:
+        LOGGER.warning("Rejected %d trip updates without trip_id", rejected)
     return rows
