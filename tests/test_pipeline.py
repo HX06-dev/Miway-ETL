@@ -189,7 +189,9 @@ def test_pipeline_extracts_transforms_and_loads_in_order(
     monkeypatch.setattr(
         pipeline,
         "load_stop_times",
-        lambda connection, rows: calls.append(("stop_times", rows)),
+        lambda connection, rows, **kwargs: (
+            calls.append(("stop_times", list(rows))) or 1
+        ),
     )
 
     pipeline.run_pipeline(routes_path, stops_path, trips_path, stop_times_path)

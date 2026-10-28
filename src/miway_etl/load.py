@@ -1,4 +1,5 @@
-from collections.abc import Mapping, Sequence
+import json
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import psycopg
 
@@ -124,6 +125,61 @@ ON CONFLICT (trip_id, stop_sequence) DO UPDATE SET
     timepoint = EXCLUDED.timepoint
 """
 
+VEHICLE_POSITIONS_UPSERT = """
+INSERT INTO vehicle_positions (
+    vehicle_id, trip_id, route_id, direction_id, latitude, longitude, bearing,
+    speed, current_stop_sequence, current_status, stop_id, timestamp,
+    congestion_level, occupancy_status, occupancy_percentage
+)
+VALUES (
+    %(vehicle_id)s, %(trip_id)s, %(route_id)s, %(direction_id)s, %(latitude)s,
+    %(longitude)s, %(bearing)s, %(speed)s, %(current_stop_sequence)s,
+    %(current_status)s, %(stop_id)s, %(timestamp)s, %(congestion_level)s,
+    %(occupancy_status)s, %(occupancy_percentage)s
+)
+ON CONFLICT (vehicle_id) DO UPDATE SET
+    trip_id = EXCLUDED.trip_id, route_id = EXCLUDED.route_id,
+    direction_id = EXCLUDED.direction_id, latitude = EXCLUDED.latitude,
+    longitude = EXCLUDED.longitude, bearing = EXCLUDED.bearing,
+    speed = EXCLUDED.speed, current_stop_sequence = EXCLUDED.current_stop_sequence,
+    current_status = EXCLUDED.current_status, stop_id = EXCLUDED.stop_id,
+    timestamp = EXCLUDED.timestamp, congestion_level = EXCLUDED.congestion_level,
+    occupancy_status = EXCLUDED.occupancy_status,
+    occupancy_percentage = EXCLUDED.occupancy_percentage,
+    updated_at = CURRENT_TIMESTAMP
+"""
+
+TRIP_UPDATES_UPSERT = """
+INSERT INTO trip_updates (
+    trip_id, route_id, vehicle_id, timestamp, delay_seconds, stop_time_updates
+)
+VALUES (
+    %(trip_id)s, %(route_id)s, %(vehicle_id)s, %(timestamp)s, %(delay_seconds)s,
+    %(stop_time_updates)s::jsonb
+)
+ON CONFLICT (trip_id) DO UPDATE SET
+    route_id = EXCLUDED.route_id, vehicle_id = EXCLUDED.vehicle_id,
+    timestamp = EXCLUDED.timestamp, delay_seconds = EXCLUDED.delay_seconds,
+    stop_time_updates = EXCLUDED.stop_time_updates, updated_at = CURRENT_TIMESTAMP
+"""
+
+ALERTS_UPSERT = """
+INSERT INTO alerts (
+    alert_id, active_periods, informed_entities, cause, effect, url,
+    header_text, description_text
+)
+VALUES (
+    %(alert_id)s, %(active_periods)s::jsonb, %(informed_entities)s::jsonb,
+    %(cause)s, %(effect)s, %(url)s, %(header_text)s, %(description_text)s
+)
+ON CONFLICT (alert_id) DO UPDATE SET
+    active_periods = EXCLUDED.active_periods,
+    informed_entities = EXCLUDED.informed_entities, cause = EXCLUDED.cause,
+    effect = EXCLUDED.effect, url = EXCLUDED.url,
+    header_text = EXCLUDED.header_text, description_text = EXCLUDED.description_text,
+    updated_at = CURRENT_TIMESTAMP
+"""
+
 def load_routes(
     connection: psycopg.Connection,
     rows: Sequence[Mapping[str, object]],
@@ -150,7 +206,67 @@ def load_trips(
 
 def load_stop_times(
     connection: psycopg.Connection,
+    rows: Iterable[Mapping[str, object]],
+    batch_size: int = 10_000,
+    on_batch: Callable[[int], None] | None = None,
+) -> int:
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+
+    total = 0
+    with connection.cursor() as cursor:
+        batch = []
+        for row in rows:
+            batch.append(row)
+            if len(batch) == batch_size:
+                cursor.executemany(STOP_TIMES_UPSERT, batch)
+                total += len(batch)
+                if on_batch is not None:
+                    on_batch(total)
+                batch.clear()
+        if batch:
+            cursor.executemany(STOP_TIMES_UPSERT, batch)
+            total += len(batch)
+            if on_batch is not None:
+                on_batch(total)
+    return total
+
+
+def _json_rows(rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> list[dict[str, object]]:
+    return [
+        {
+            **row,
+            **{column: json.dumps(row[column]) for column in columns},
+        }
+        for row in rows
+    ]
+
+
+def load_vehicle_positions(
+    connection: psycopg.Connection,
     rows: Sequence[Mapping[str, object]],
 ) -> None:
     with connection.cursor() as cursor:
-        cursor.executemany(STOP_TIMES_UPSERT, rows)
+        cursor.executemany(VEHICLE_POSITIONS_UPSERT, rows)
+
+
+def load_trip_updates(
+    connection: psycopg.Connection,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            TRIP_UPDATES_UPSERT,
+            _json_rows(rows, ("stop_time_updates",)),
+        )
+
+
+def load_alerts(
+    connection: psycopg.Connection,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            ALERTS_UPSERT,
+            _json_rows(rows, ("active_periods", "informed_entities")),
+        )

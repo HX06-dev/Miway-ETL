@@ -81,3 +81,44 @@ CREATE TABLE IF NOT EXISTS stop_times (
         FOREIGN KEY (stop_id)
         REFERENCES stops (stop_id)
 );
+
+CREATE TABLE IF NOT EXISTS vehicle_positions (
+    vehicle_id TEXT PRIMARY KEY,
+    trip_id TEXT,
+    route_id TEXT,
+    direction_id TEXT,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    bearing REAL,
+    speed REAL,
+    current_stop_sequence INTEGER,
+    current_status SMALLINT,
+    stop_id TEXT,
+    timestamp BIGINT,
+    congestion_level SMALLINT,
+    occupancy_status SMALLINT,
+    occupancy_percentage SMALLINT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS trip_updates (
+    trip_id TEXT PRIMARY KEY,
+    route_id TEXT,
+    vehicle_id TEXT,
+    timestamp BIGINT,
+    delay_seconds INTEGER,
+    stop_time_updates JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id TEXT PRIMARY KEY,
+    active_periods JSONB NOT NULL,
+    informed_entities JSONB NOT NULL,
+    cause SMALLINT,
+    effect SMALLINT,
+    url TEXT,
+    header_text TEXT,
+    description_text TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
