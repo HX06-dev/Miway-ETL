@@ -12,7 +12,50 @@ EXPECTED_COLUMNS = {
     ("stop_times", "departure_time"): "integer",
     ("vehicle_positions", "direction_id"): "smallint",
     ("alerts", "observed_at"): "bigint",
+    ("static_feed_loads", "loader_version"): "integer",
+    ("shapes", "shape_pt_sequence"): "integer",
+    ("feed_info", "feed_version"): "text",
 }
+
+
+def apply_migrations(connection) -> None:
+    schema_path = PROJECT_ROOT / "sql" / "schema.sql"
+    migration_dir = PROJECT_ROOT / "sql" / "migrations"
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    has_routes = connection.execute(
+        "SELECT to_regclass('public.routes')"
+    ).fetchone()[0]
+    if has_routes is None:
+        connection.execute(schema_path.read_text(encoding="utf-8"))
+
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (version)
+        VALUES ('0000_baseline')
+        ON CONFLICT (version) DO NOTHING
+        """
+    )
+    applied_versions = {
+        row[0]
+        for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+    }
+    for migration_path in sorted(migration_dir.glob("*.sql")):
+        version = migration_path.stem
+        if version in applied_versions:
+            continue
+        connection.execute(migration_path.read_text(encoding="utf-8"))
+        connection.execute(
+            "INSERT INTO schema_migrations (version) VALUES (%s)",
+            (version,),
+        )
+        applied_versions.add(version)
 
 
 def validate_schema(connection) -> None:
@@ -32,21 +75,18 @@ def validate_schema(connection) -> None:
             raise RuntimeError(
                 f"Schema mismatch for {table_name}.{column_name}: "
                 f"expected {expected_type}, found {actual}. "
-                "Run reset_db --yes before initializing again."
+                "Check pending migrations and schema_migrations; only reset disposable databases."
             )
 
 
 def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
 
-    schema_path = PROJECT_ROOT / "sql" / "schema.sql"
-    schema_sql = schema_path.read_text(encoding="utf-8")
-
     with get_connection() as connection:
-        connection.execute(schema_sql)
+        apply_migrations(connection)
         validate_schema(connection)
 
-    print(f"Initialized database using {schema_path}")
+    print(f"Initialized database using migrations in {PROJECT_ROOT / 'sql' / 'migrations'}")
 
 if __name__ == "__main__":
     main()

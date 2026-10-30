@@ -9,5 +9,64 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miway -d miway"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  etl-init:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://miway:miway@db:5432/miway}
+    command: ["python", "-m", "miway_etl.init_db"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+  poller:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://miway:miway@db:5432/miway}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+    command: ["python", "-m", "miway_etl.scheduler"]
+    depends_on:
+      etl-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "miway_etl.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 4m
+  backup:
+    image: postgres:16
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://miway:miway@db:5432/miway}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mkdir -p /backups
+        while true; do
+          backup="/backups/miway-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+          pg_dump "$$DATABASE_URL" --format=custom --file="$$backup.tmp"
+          mv "$$backup.tmp" "$$backup"
+          find /backups -type f -name 'miway-*.dump' -mtime +"$$BACKUP_RETENTION_DAYS" -delete
+          sleep "$$BACKUP_INTERVAL_SECONDS"
+        done
+    depends_on:
+      etl-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./data/backups:/backups
+    restart: unless-stopped
 volumes:
   pgdata:

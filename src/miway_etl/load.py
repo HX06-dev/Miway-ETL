@@ -3,6 +3,42 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import psycopg
 
+AGENCY_UPSERT = """
+INSERT INTO agency (
+    agency_id, agency_name, agency_url, agency_timezone, agency_lang,
+    agency_phone, agency_fare_url, agency_email, cemv_support
+)
+VALUES (
+    %(agency_id)s, %(agency_name)s, %(agency_url)s, %(agency_timezone)s,
+    %(agency_lang)s, %(agency_phone)s, %(agency_fare_url)s, %(agency_email)s,
+    %(cemv_support)s
+)
+ON CONFLICT (agency_id) DO UPDATE SET
+    agency_name = EXCLUDED.agency_name, agency_url = EXCLUDED.agency_url,
+    agency_timezone = EXCLUDED.agency_timezone, agency_lang = EXCLUDED.agency_lang,
+    agency_phone = EXCLUDED.agency_phone, agency_fare_url = EXCLUDED.agency_fare_url,
+    agency_email = EXCLUDED.agency_email, cemv_support = EXCLUDED.cemv_support
+"""
+
+FEED_INFO_UPSERT = """
+INSERT INTO feed_info (
+    feed_name, feed_publisher_name, feed_publisher_url, feed_lang, default_lang,
+    feed_start_date, feed_end_date, feed_version, feed_contact_email, feed_contact_url
+)
+VALUES (
+    %(feed_name)s, %(feed_publisher_name)s, %(feed_publisher_url)s, %(feed_lang)s,
+    %(default_lang)s, %(feed_start_date)s, %(feed_end_date)s, %(feed_version)s,
+    %(feed_contact_email)s, %(feed_contact_url)s
+)
+ON CONFLICT (feed_name) DO UPDATE SET
+    feed_publisher_name = EXCLUDED.feed_publisher_name,
+    feed_publisher_url = EXCLUDED.feed_publisher_url,
+    feed_lang = EXCLUDED.feed_lang, default_lang = EXCLUDED.default_lang,
+    feed_start_date = EXCLUDED.feed_start_date, feed_end_date = EXCLUDED.feed_end_date,
+    feed_version = EXCLUDED.feed_version, feed_contact_email = EXCLUDED.feed_contact_email,
+    feed_contact_url = EXCLUDED.feed_contact_url
+"""
+
 ROUTES_UPSERT = """
 INSERT INTO routes (
     route_id,
@@ -105,6 +141,36 @@ INSERT INTO calendar_dates (service_id, date, exception_type)
 VALUES (%(service_id)s, %(date)s, %(exception_type)s)
 ON CONFLICT (service_id, date) DO UPDATE SET
     exception_type = EXCLUDED.exception_type
+"""
+
+CALENDAR_UPSERT = """
+INSERT INTO calendar (
+    service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday,
+    start_date, end_date
+)
+VALUES (
+    %(service_id)s, %(monday)s, %(tuesday)s, %(wednesday)s, %(thursday)s,
+    %(friday)s, %(saturday)s, %(sunday)s, %(start_date)s, %(end_date)s
+)
+ON CONFLICT (service_id) DO UPDATE SET
+    monday = EXCLUDED.monday, tuesday = EXCLUDED.tuesday,
+    wednesday = EXCLUDED.wednesday, thursday = EXCLUDED.thursday,
+    friday = EXCLUDED.friday, saturday = EXCLUDED.saturday,
+    sunday = EXCLUDED.sunday, start_date = EXCLUDED.start_date,
+    end_date = EXCLUDED.end_date
+"""
+
+SHAPES_UPSERT = """
+INSERT INTO shapes (
+    shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence, shape_dist_traveled
+)
+VALUES (
+    %(shape_id)s, %(shape_pt_lat)s, %(shape_pt_lon)s, %(shape_pt_sequence)s,
+    %(shape_dist_traveled)s
+)
+ON CONFLICT (shape_id, shape_pt_sequence) DO UPDATE SET
+    shape_pt_lat = EXCLUDED.shape_pt_lat, shape_pt_lon = EXCLUDED.shape_pt_lon,
+    shape_dist_traveled = EXCLUDED.shape_dist_traveled
 """
 
 STOP_TIMES_UPSERT = """
@@ -253,6 +319,22 @@ def load_routes(
         cursor.executemany(ROUTES_UPSERT, rows)
 
 
+def load_agency(
+    connection: psycopg.Connection,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(AGENCY_UPSERT, rows)
+
+
+def load_feed_info(
+    connection: psycopg.Connection,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(FEED_INFO_UPSERT, rows)
+
+
 def load_stops(
     connection: psycopg.Connection,
     rows: Sequence[Mapping[str, object]],
@@ -276,11 +358,43 @@ def load_calendar_dates(
         cursor.executemany(CALENDAR_DATES_UPSERT, rows)
 
 
+def load_calendar(
+    connection: psycopg.Connection,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(CALENDAR_UPSERT, rows)
+
+
+def load_shapes(
+    connection: psycopg.Connection,
+    rows: Iterable[Mapping[str, object]],
+    batch_size: int = 10_000,
+    on_batch: Callable[[int], None] | None = None,
+) -> int:
+    return _load_batched(
+        connection, SHAPES_UPSERT, rows, batch_size=batch_size, on_batch=on_batch
+    )
+
+
 def load_stop_times(
     connection: psycopg.Connection,
     rows: Iterable[Mapping[str, object]],
     batch_size: int = 10_000,
     on_batch: Callable[[int], None] | None = None,
+) -> int:
+    return _load_batched(
+        connection, STOP_TIMES_UPSERT, rows, batch_size=batch_size, on_batch=on_batch
+    )
+
+
+def _load_batched(
+    connection: psycopg.Connection,
+    query: str,
+    rows: Iterable[Mapping[str, object]],
+    *,
+    batch_size: int,
+    on_batch: Callable[[int], None] | None,
 ) -> int:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -291,13 +405,13 @@ def load_stop_times(
         for row in rows:
             batch.append(row)
             if len(batch) == batch_size:
-                cursor.executemany(STOP_TIMES_UPSERT, batch)
+                cursor.executemany(query, batch)
                 total += len(batch)
                 if on_batch is not None:
                     on_batch(total)
                 batch.clear()
         if batch:
-            cursor.executemany(STOP_TIMES_UPSERT, batch)
+            cursor.executemany(query, batch)
             total += len(batch)
             if on_batch is not None:
                 on_batch(total)

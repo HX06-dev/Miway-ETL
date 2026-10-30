@@ -10,8 +10,13 @@ from miway_etl.db import get_connection
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 RESET_SQL = """
+DROP TABLE IF EXISTS schema_migrations;
 DROP TABLE IF EXISTS static_feed_loads;
 DROP TABLE IF EXISTS calendar_dates;
+DROP TABLE IF EXISTS calendar;
+DROP TABLE IF EXISTS shapes;
+DROP TABLE IF EXISTS feed_info;
+DROP TABLE IF EXISTS agency;
 DROP TABLE IF EXISTS alerts;
 DROP TABLE IF EXISTS alert_history;
 DROP TABLE IF EXISTS trip_update_history;
@@ -45,7 +50,8 @@ def main(argv: list[str] | None = None) -> None:
         connection.execute(RESET_SQL)
 
     print(
-        "Reset database tables: alerts, alert_history, trip_updates, "
+        "Reset database tables: schema_migrations, agency, feed_info, calendar, "
+        "shapes, alerts, alert_history, trip_updates, "
         "trip_update_history, vehicle_positions, vehicle_position_history, "
         "calendar_dates, stop_times, trips, stops, routes"
     )

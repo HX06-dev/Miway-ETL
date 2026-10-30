@@ -15,7 +15,13 @@ import httpx
 from google.transit import gtfs_realtime_pb2
 
 FEED_FILES = ("routes.txt", "stops.txt", "trips.txt", "stop_times.txt")
-OPTIONAL_FEED_FILES = ("calendar_dates.txt",)
+OPTIONAL_FEED_FILES = (
+    "agency.txt",
+    "calendar.txt",
+    "calendar_dates.txt",
+    "feed_info.txt",
+    "shapes.txt",
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -128,6 +134,11 @@ def _read_rows(file_path: str | Path) -> list[dict[str, str]]:
 def read_routes(file_path: str | Path) -> list[dict[str, str]]:
     return _read_rows(file_path)
 
+
+def read_agency(file_path: str | Path) -> list[dict[str, str]]:
+    return _read_rows(file_path)
+
+
 def read_stops(file_path: str | Path) -> list[dict[str, str]]:
     return _read_rows(file_path)
 
@@ -138,7 +149,20 @@ def read_calendar_dates(file_path: str | Path) -> list[dict[str, str]]:
     return _read_rows(file_path)
 
 
+def read_calendar(file_path: str | Path) -> list[dict[str, str]]:
+    return _read_rows(file_path)
+
+
+def read_feed_info(file_path: str | Path) -> list[dict[str, str]]:
+    return _read_rows(file_path)
+
+
 def read_stop_times(file_path: str | Path) -> Iterator[dict[str, str]]:
+    with Path(file_path).open(newline="", encoding="utf-8") as input_file:
+        yield from csv.DictReader(input_file)
+
+
+def read_shapes(file_path: str | Path) -> Iterator[dict[str, str]]:
     with Path(file_path).open(newline="", encoding="utf-8") as input_file:
         yield from csv.DictReader(input_file)
 

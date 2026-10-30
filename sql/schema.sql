@@ -1,8 +1,13 @@
 -- Load order:
---   1. routes
---   2. stops
---   3. trips
---   4. stop_times
+--   1. agency
+--   2. routes
+--   3. stops
+--   4. trips
+--   5. calendar and calendar_dates
+--   6. feed_info and shapes
+--   7. stop_times
+--
+-- Additional static tables and version tracking are installed by migrations.
 
 CREATE TABLE IF NOT EXISTS static_feed_loads (
     feed_name TEXT PRIMARY KEY,
@@ -12,7 +17,7 @@ CREATE TABLE IF NOT EXISTS static_feed_loads (
 
 CREATE TABLE IF NOT EXISTS routes (
     route_id TEXT PRIMARY KEY,
-    agency_id TEXT NOT NULL,
+    agency_id TEXT,
     route_short_name TEXT,
     route_long_name TEXT,
     route_desc TEXT,

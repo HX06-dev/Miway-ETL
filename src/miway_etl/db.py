@@ -2,6 +2,7 @@ import os
 
 import psycopg
 
+
 def get_connection():
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:

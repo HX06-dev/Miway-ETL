@@ -7,5 +7,7 @@ __pycache__/
 .mypy_cache/
 data/raw/
 data/quarantine/
+data/backups/
+data/.poller-last-success
 *.egg-info/
 .vscode/

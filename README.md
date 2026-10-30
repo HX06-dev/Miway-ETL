@@ -9,14 +9,17 @@ Topics: `gtfs` `gtfs-realtime` `etl` `postgresql` `public-transit` `python`
 
 ```powershell
 Copy-Item .env.example .env
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-Start PostgreSQL, then initialize the schema:
+Start PostgreSQL, then initialize or upgrade the database:
 
 ```powershell
 python -m miway_etl.init_db
 ```
+
+`init_db` applies versioned SQL migrations. Existing databases are adopted as
+the initial baseline before pending migrations are applied.
 
 ## Commands
 
@@ -33,9 +36,14 @@ python -m miway_etl.pipeline poll
 ```
 
 Static and realtime loads use separate transactions. Static data is loaded with
-batched `executemany`; `stop_times` is streamed in batches of 10,000 rows.
+batched `executemany`; `stop_times` and `shapes` are streamed in batches of
+10,000 rows. In addition to routes, stops, trips, and stop times, the loader
+ingests agency metadata, feed metadata, weekly calendar service, calendar-date
+exceptions, and shapes when those optional files are present.
 Previously loaded static feed hashes are recorded in PostgreSQL so a successful
-unchanged feed is skipped safely.
+unchanged feed is skipped safely. A loader-version marker forces a reload after
+the set of loaded static tables changes. Rows absent from a newer feed are
+retained; they are not deleted.
 
 Realtime current-state tables are:
 
@@ -58,9 +66,39 @@ Current upserts reject older feed timestamps. Cleanup follows this policy:
 
 Realtime payloads are saved under `data/raw/realtime/` before decoding.
 
-`trips.service_id` is retained as a source identifier. The optional
-`calendar_dates.txt` feed is stored in `calendar_dates`; weekly `calendar.txt`
-modeling is intentionally not included.
+`trips.service_id` is retained as a source identifier.
+
+## Docker polling
+
+The Compose stack starts PostgreSQL, applies migrations, and runs an unattended
+realtime poller:
+
+```powershell
+docker compose up --build -d
+docker compose logs -f poller
+```
+
+Set `POLL_INTERVAL_SECONDS` and `RETENTION_DAYS` in `.env` to adjust the polling
+interval and retention period. Retention defaults to 30 days; set it to `0` to
+disable automated history/raw-file retention. The poller logs failures and
+retries on the next interval. Review provider guidance before choosing a
+polling interval. The poller container reports unhealthy if no successful poll
+has completed for the configured interval plus the maximum expected download
+time; inspect this status with `docker compose ps`.
+The host `DATABASE_URL` in `.env` is overridden inside Compose to reach the
+database service; use `DOCKER_DATABASE_URL` only if a different container
+database URL is needed.
+
+Retention removes old realtime history and old files in `data/raw/archives/`,
+`data/raw/realtime/`, and `data/raw/releases/`. The latest static release is
+always preserved. Retention is based on database record timestamps and file
+modification times.
+
+The Compose stack also makes an immediate PostgreSQL custom-format backup, then
+repeats according to `BACKUP_INTERVAL_SECONDS` (default: daily). It prunes local
+backup files older than `BACKUP_RETENTION_DAYS` (default: 30). Backups are stored
+in ignored `data/backups/`; copy them to independent, off-host storage for
+disaster recovery. Restore a backup with `pg_restore` into a fresh database.
 
 ## Reset
 
@@ -82,11 +120,12 @@ Run tests:
 
 ```powershell
 python -m pytest tests
+ruff check src tests
 ```
 
-The suite covers static extraction failures, protobuf parsing, transformations,
-load ordering, and rollback. Integration tests require a separate
-`TEST_DATABASE_URL`:
+The CI workflow runs unit tests, Ruff, and the PostgreSQL integration test.
+To run integration tests locally, set `TEST_DATABASE_URL` to a separate
+disposable PostgreSQL database:
 
 ```powershell
 $env:TEST_DATABASE_URL = "postgresql://miway:miway@localhost:5433/miway_test"
